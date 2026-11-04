@@ -4,23 +4,25 @@ namespace mlaa {
 
 namespace {
 
-// تابع بازگشتی است و نباید force inline باشد تا GCC خطای recursive inlining ندهد
-void sample_sort_internal_impl(int64_t* MLAA_RESTRICT src,
-                               int64_t* MLAA_RESTRICT tmp,
+template <typename T>
+void sample_sort_internal_impl(T* MLAA_RESTRICT src,
+                               T* MLAA_RESTRICT tmp,
                                uint8_t* MLAA_RESTRICT oracle,
                                size_t n,
-                               const detail::CacheTuningParams& topo) {
+                               const detail::CacheTuningParams<T>& topo) {
     if (n <= topo.base_case_threshold) {
         std::sort(src, src + n);
         return;
     }
+
+    constexpr size_t PREFETCH_DISTANCE = 512 / sizeof(T);
 
     if (n < 32768) {
         constexpr int K = 16;
         constexpr int ALPHA = 16;
         constexpr size_t NUM_SAMPLES = K * ALPHA - 1;
 
-        alignas(64) int64_t samples[NUM_SAMPLES];
+        alignas(64) T samples[NUM_SAMPLES];
         const size_t step = n / NUM_SAMPLES;
 
         MLAA_UNROLL
@@ -29,7 +31,7 @@ void sample_sort_internal_impl(int64_t* MLAA_RESTRICT src,
         }
         std::sort(samples, samples + NUM_SAMPLES);
 
-        alignas(64) int64_t splitters[K - 1];
+        alignas(64) T splitters[K - 1];
         for (int i = 0; i < K - 1; ++i) {
             splitters[i] = samples[(i + 1) * ALPHA - 1];
         }
@@ -39,7 +41,7 @@ void sample_sort_internal_impl(int64_t* MLAA_RESTRICT src,
             return;
         }
 
-        alignas(64) detail::DecisionTree<K> tree;
+        alignas(64) detail::DecisionTree<T, K> tree;
         tree.build(splitters);
 
         size_t bucket_counts[K] = {0};
@@ -47,8 +49,8 @@ void sample_sort_internal_impl(int64_t* MLAA_RESTRICT src,
         size_t i = 0;
 
         for (; i < n_vec; i += 8) {
-            if ((i & 63) == 0 && i + 64 < n) {
-                _mm_prefetch(reinterpret_cast<const char*>(src + i + 64), _MM_HINT_T0);
+            if ((i & 63) == 0 && i + PREFETCH_DISTANCE < n) {
+                _mm_prefetch(reinterpret_cast<const char*>(src + i + PREFETCH_DISTANCE), _MM_HINT_T0);
             }
             tree.classify_8(src + i, oracle + i);
             bucket_counts[oracle[i]]++;
@@ -94,11 +96,19 @@ void sample_sort_internal_impl(int64_t* MLAA_RESTRICT src,
             }
 
             if (len <= topo.base_case_threshold) {
-                std::memcpy(src + start, tmp + start, len * sizeof(int64_t));
+                if constexpr (std::is_trivially_copyable_v<T>) {
+                    std::memcpy(src + start, tmp + start, len * sizeof(T));
+                } else {
+                    std::move(tmp + start, tmp + start + len, src + start);
+                }
                 std::sort(src + start, src + start + len);
             } else {
                 sample_sort_internal_impl(tmp + start, src + start, oracle + start, len, topo);
-                std::memcpy(src + start, tmp + start, len * sizeof(int64_t));
+                if constexpr (std::is_trivially_copyable_v<T>) {
+                    std::memcpy(src + start, tmp + start, len * sizeof(T));
+                } else {
+                    std::move(tmp + start, tmp + start + len, src + start);
+                }
             }
         }
     } else {
@@ -106,14 +116,14 @@ void sample_sort_internal_impl(int64_t* MLAA_RESTRICT src,
         constexpr int ALPHA = 16;
         constexpr size_t NUM_SAMPLES = K * ALPHA - 1;
 
-        alignas(64) int64_t samples[NUM_SAMPLES];
+        alignas(64) T samples[NUM_SAMPLES];
         const size_t step = n / NUM_SAMPLES;
         for (size_t i = 0; i < NUM_SAMPLES; ++i) {
             samples[i] = src[i * step];
         }
         std::sort(samples, samples + NUM_SAMPLES);
 
-        alignas(64) int64_t splitters[K - 1];
+        alignas(64) T splitters[K - 1];
         for (int i = 0; i < K - 1; ++i) {
             splitters[i] = samples[(i + 1) * ALPHA - 1];
         }
@@ -123,7 +133,7 @@ void sample_sort_internal_impl(int64_t* MLAA_RESTRICT src,
             return;
         }
 
-        alignas(64) detail::DecisionTree<K> tree;
+        alignas(64) detail::DecisionTree<T, K> tree;
         tree.build(splitters);
 
         size_t bucket_counts[K] = {0};
@@ -131,8 +141,8 @@ void sample_sort_internal_impl(int64_t* MLAA_RESTRICT src,
         size_t i = 0;
 
         for (; i < n_vec; i += 8) {
-            if ((i & 63) == 0 && i + 64 < n) {
-                _mm_prefetch(reinterpret_cast<const char*>(src + i + 64), _MM_HINT_T0);
+            if ((i & 63) == 0 && i + PREFETCH_DISTANCE < n) {
+                _mm_prefetch(reinterpret_cast<const char*>(src + i + PREFETCH_DISTANCE), _MM_HINT_T0);
             }
             tree.classify_8(src + i, oracle + i);
             bucket_counts[oracle[i]]++;
@@ -178,11 +188,19 @@ void sample_sort_internal_impl(int64_t* MLAA_RESTRICT src,
             }
 
             if (len <= topo.base_case_threshold) {
-                std::memcpy(src + start, tmp + start, len * sizeof(int64_t));
+                if constexpr (std::is_trivially_copyable_v<T>) {
+                    std::memcpy(src + start, tmp + start, len * sizeof(T));
+                } else {
+                    std::move(tmp + start, tmp + start + len, src + start);
+                }
                 std::sort(src + start, src + start + len);
             } else {
                 sample_sort_internal_impl(tmp + start, src + start, oracle + start, len, topo);
-                std::memcpy(src + start, tmp + start, len * sizeof(int64_t));
+                if constexpr (std::is_trivially_copyable_v<T>) {
+                    std::memcpy(src + start, tmp + start, len * sizeof(T));
+                } else {
+                    std::move(tmp + start, tmp + start + len, src + start);
+                }
             }
         }
     }
@@ -190,18 +208,20 @@ void sample_sort_internal_impl(int64_t* MLAA_RESTRICT src,
 
 } // anonymous namespace
 
-void sample_sort_internal(int64_t* MLAA_RESTRICT src,
-                          int64_t* MLAA_RESTRICT tmp,
+template <typename T>
+void sample_sort_internal(T* MLAA_RESTRICT src,
+                          T* MLAA_RESTRICT tmp,
                           uint8_t* MLAA_RESTRICT oracle,
                           size_t n) {
-    const auto& topo = detail::CacheTuningParams::get();
+    const auto& topo = detail::CacheTuningParams<T>::get();
     sample_sort_internal_impl(src, tmp, oracle, n, topo);
 }
 
-void sample_sort_internal(int64_t* MLAA_RESTRICT src,
-                          int64_t* MLAA_RESTRICT tmp,
+template <typename T>
+void sample_sort_internal(T* MLAA_RESTRICT src,
+                          T* MLAA_RESTRICT tmp,
                           size_t n) {
-    const auto& topo = detail::CacheTuningParams::get();
+    const auto& topo = detail::CacheTuningParams<T>::get();
     if (n <= topo.base_case_threshold) {
         std::sort(src, src + n);
         return;
@@ -209,5 +229,20 @@ void sample_sort_internal(int64_t* MLAA_RESTRICT src,
     detail::HeapBuffer<uint8_t> oracle_buffer(n);
     sample_sort_internal_impl(src, tmp, oracle_buffer.get(), n, topo);
 }
+
+// Explicit Template Instantiations
+#define INSTANTIATE_SAMPLE_SORT(Type)                                                      \
+    template void sample_sort_internal<Type>(Type*, Type*, uint8_t*, size_t);             \
+    template void sample_sort_internal<Type>(Type*, Type*, size_t);                       \
+    template size_t detail::get_base_case_threshold<Type>() noexcept;
+
+INSTANTIATE_SAMPLE_SORT(int64_t)
+INSTANTIATE_SAMPLE_SORT(uint64_t)
+INSTANTIATE_SAMPLE_SORT(int32_t)
+INSTANTIATE_SAMPLE_SORT(uint32_t)
+INSTANTIATE_SAMPLE_SORT(double)
+INSTANTIATE_SAMPLE_SORT(float)
+
+#undef INSTANTIATE_SAMPLE_SORT
 
 } // namespace mlaa

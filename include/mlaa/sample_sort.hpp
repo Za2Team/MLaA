@@ -27,9 +27,21 @@
 
 namespace mlaa {
 
+template <typename T>
+concept SupportedFastNumeric = 
+    std::same_as<T, int64_t>  ||
+    std::same_as<T, uint64_t> ||
+    std::same_as<T, int32_t>  ||
+    std::same_as<T, uint32_t> ||
+    std::same_as<T, double>   ||
+    std::same_as<T, float>;
+
+template <typename T>
+concept SortableComparable = std::totally_ordered<T>;
+
 namespace detail {
 
-// بافر سبک RAII با عملکرد فوق‌سریع و بدون سربار Zero-fill یا تداخل با لینکر
+// RAII
 template <typename T>
 struct HeapBuffer {
     T* ptr;
@@ -53,37 +65,50 @@ struct HeapBuffer {
     MLAA_FORCE_INLINE T* data() const noexcept { return ptr; }
 };
 
+template <typename T>
+size_t get_base_case_threshold() noexcept;
+
 } // namespace detail
 
-void sample_sort_internal(int64_t* MLAA_RESTRICT src,
-                          int64_t* MLAA_RESTRICT tmp,
+template <typename T>
+void sample_sort_internal(T* MLAA_RESTRICT src,
+                          T* MLAA_RESTRICT tmp,
                           uint8_t* MLAA_RESTRICT oracle,
                           size_t n);
 
-void sample_sort_internal(int64_t* MLAA_RESTRICT src,
-                          int64_t* MLAA_RESTRICT tmp,
+template <typename T>
+void sample_sort_internal(T* MLAA_RESTRICT src,
+                          T* MLAA_RESTRICT tmp,
                           size_t n);
 
+// (Compile-Time Type Dispatcher)
 template <std::random_access_iterator RandomIt>
 MLAA_FORCE_INLINE void sample_sort(RandomIt begin, RandomIt end) {
     const size_t n = static_cast<size_t>(std::distance(begin, end));
     if (n <= 1) [[unlikely]] return;
 
     using ValueType = typename std::iterator_traits<RandomIt>::value_type;
-    static_assert(std::is_same_v<ValueType, int64_t>, "Currently optimized strictly for int64_t");
 
-    int64_t* src = &(*begin);
+    if constexpr (SupportedFastNumeric<ValueType>) {
+        ValueType* src = &(*begin);
+        const size_t base_threshold = detail::get_base_case_threshold<ValueType>();
 
-    constexpr size_t BASE_THRESHOLD = 1024;
-    if (n <= BASE_THRESHOLD) [[unlikely]] {
-        std::sort(src, src + n);
-        return;
+        if (n <= base_threshold) [[unlikely]] {
+            std::sort(src, src + n);
+            return;
+        }
+
+        detail::HeapBuffer<ValueType> tmp_buffer(n);
+        detail::HeapBuffer<uint8_t> oracle_buffer(n);
+
+        sample_sort_internal<ValueType>(src, tmp_buffer.get(), oracle_buffer.get(), n);
     }
-
-    detail::HeapBuffer<int64_t> tmp_buffer(n);
-    detail::HeapBuffer<uint8_t> oracle_buffer(n);
-
-    sample_sort_internal(src, tmp_buffer.get(), oracle_buffer.get(), n);
+    else if constexpr (SortableComparable<ValueType>) {
+        std::sort(begin, end);
+    } else {
+        static_assert(SortableComparable<ValueType>, 
+                      "Type must support total ordering via operator< to be sorted.");
+    }
 }
 
 } // namespace mlaa
