@@ -3,15 +3,15 @@
 #include <fstream>
 #include <chrono>
 #include <filesystem>
-#include <numeric>
 #include <algorithm>
-#include <cstring>
 #include <cstdint>
 
 #include <mlaa/CpuTopology.hpp>
-#include <mlaa/sample_sort.hpp> // استفاده از هدر عمومی تابع اصلی
+#include <mlaa/sample_sort.hpp>
+#include <mlaa/FastRMI.hpp>
 
 int main() {
+    // 1. Hardware topology inspection
     const auto& cpu = mlaa::CpuTopology::get();
 
     std::cout << "========================================\n";
@@ -29,110 +29,117 @@ int main() {
     std::cout << "AVX Supported  : " << (cpu.has_avx ? "Yes" : "No") << "\n";
     std::cout << "AVX2 Supported : " << (cpu.has_avx2 ? "Yes" : "No") << "\n";
     std::cout << "FMA Supported  : " << (cpu.has_fma ? "Yes" : "No") << "\n";
-    std::cout << "AVX-512F       : " << (cpu.has_avx512f ? "Yes" : "No") << "\n";
-    std::cout << "AVX-512VL/BW/DQ: " << (cpu.has_avx512vl && cpu.has_avx512bw && cpu.has_avx512dq ? "Yes" : "No") << "\n";
     std::cout << "========================================\n";
 
-    // =========================================================================
-    //        BENCHMARK: sample_sort
-    // =========================================================================
-    std::cout << "\n========================================\n";
-    std::cout << "        BENCHMARK: SAMPLE SORT          \n";
-    std::cout << "========================================\n";
+    // 2. Load dataset (1,000,000 int64_t elements = 8 MB)
+    constexpr size_t DATASET_SIZE = 1'000'000;
+    std::string bin_path = R"(C:\C++\mlaa\benchmark\gaussian_1m.bin)";
 
-    constexpr size_t BENCHMARK_ELEMENTS = 200'000;
-    std::string bin_path = R"(C:\Users\Lenovo\Desktop\Za2Net Projects\C++\mlaa\benchmark\gaussian_1m.bin)";
-
-    // بررسی مسیر نسبی در صورت اجرا از دایرکتوری build
     if (!std::filesystem::exists(bin_path)) {
         bin_path = "../benchmark/gaussian_1m.bin";
     }
 
     std::ifstream file(bin_path, std::ios::binary);
     if (!file.is_open()) {
-        std::cerr << "[ERROR] Could not open dataset at:\n  " << bin_path << "\n";
+        std::cerr << "[ERROR] Failed to open dataset: " << bin_path << "\n";
         return 1;
     }
 
-    std::vector<int64_t> raw_dataset(BENCHMARK_ELEMENTS);
-    file.read(reinterpret_cast<char*>(raw_dataset.data()), BENCHMARK_ELEMENTS * sizeof(int64_t));
+    std::vector<int64_t> dataset(DATASET_SIZE);
+    file.read(reinterpret_cast<char*>(dataset.data()), DATASET_SIZE * sizeof(int64_t));
     const std::streamsize bytes_read = file.gcount();
     file.close();
 
-    if (bytes_read != static_cast<std::streamsize>(BENCHMARK_ELEMENTS * sizeof(int64_t))) {
-        std::cerr << "[ERROR] Expected to read " << BENCHMARK_ELEMENTS * sizeof(int64_t)
-                  << " bytes, but read " << bytes_read << " bytes.\n";
+    if (bytes_read != static_cast<std::streamsize>(DATASET_SIZE * sizeof(int64_t))) {
+        std::cerr << "[ERROR] Partial read: expected " << DATASET_SIZE * sizeof(int64_t)
+                  << " bytes, got " << bytes_read << " bytes.\n";
         return 1;
     }
 
-    std::cout << "Elements Loaded : " << BENCHMARK_ELEMENTS << " int64_t (~" 
-              << (BENCHMARK_ELEMENTS * sizeof(int64_t) / 1024) << " KB)\n";
-    std::cout << "Target Memory   : Fitting completely inside L2/L3 Cache\n";
-    std::cout << "----------------------------------------\n";
+    std::cout << "\nDataset Loaded  : " << DATASET_SIZE << " int64_t elements (~"
+              << (DATASET_SIZE * sizeof(int64_t) / (1024 * 1024)) << " MB)\n";
 
-    // ۱. بررسی صحت عملکرد الگوریتم (Correctness Test)
-    {
-        std::vector<int64_t> test_arr = raw_dataset;
+    // 3. Single-pass sorting via mlaa::sample_sort
+    mlaa::sample_sort(dataset.begin(), dataset.end());
 
-        // فراخوانی مستقیم API اصلی
-        mlaa::sample_sort(test_arr.begin(), test_arr.end());
-
-        if (!std::is_sorted(test_arr.begin(), test_arr.end())) {
-            std::cerr << "[FAIL] Output is NOT sorted correctly!\n";
-            return 1;
-        }
-        std::cout << "Verification    : PASSED (std::is_sorted == true)\n";
+    if (!std::is_sorted(dataset.begin(), dataset.end())) {
+        std::cerr << "[FAIL] Output array is NOT sorted correctly!\n";
+        return 1;
     }
+    std::cout << "Sort Verification: PASSED (std::is_sorted == true)\n";
 
-    // ۲. بنچمارک دقیق ۱۰ تکرار برای mlaa::sample_sort
-    constexpr int ITERATIONS = 10;
-    std::vector<double> sample_sort_times;
-    sample_sort_times.reserve(ITERATIONS);
+    // 4. Construct FastRMI on sorted data
+    mlaa::FastRMI<int64_t> rmi(dataset);
 
-    std::vector<int64_t> work_buffer(BENCHMARK_ELEMENTS);
+    // 5. Query validation for index 550,000
+    constexpr size_t TARGET_INDEX = 550'000;
+    const int64_t query_key = dataset[TARGET_INDEX];
 
-    for (int iter = 0; iter < ITERATIONS; ++iter) {
-        std::memcpy(work_buffer.data(), raw_dataset.data(), BENCHMARK_ELEMENTS * sizeof(int64_t));
+    // Measure raw prediction latency
+    const auto t_start = std::chrono::high_resolution_clock::now();
+    auto [pred_pos, error_bound] = rmi.predict(query_key);
+    const auto t_end = std::chrono::high_resolution_clock::now();
 
-        const auto start = std::chrono::high_resolution_clock::now();
-        mlaa::sample_sort(work_buffer.begin(), work_buffer.end());
-        const auto end = std::chrono::high_resolution_clock::now();
+    const double latency_ns = std::chrono::duration<double, std::nano>(t_end - t_start).count();
 
-        const double elapsed_us = std::chrono::duration<double, std::micro>(end - start).count();
-        sample_sort_times.push_back(elapsed_us);
-    }
+    // 6. Calculate bounded search range
+    const size_t bound_min = (pred_pos > error_bound) ? (pred_pos - error_bound) : 0;
+    const size_t bound_max = std::min(static_cast<size_t>(pred_pos + error_bound), DATASET_SIZE - 1);
 
-    const double min_ss_us = *std::min_element(sample_sort_times.begin(), sample_sort_times.end());
-    const double avg_ss_us = std::accumulate(sample_sort_times.begin(), sample_sort_times.end(), 0.0) / ITERATIONS;
+    // Local refinement search within bounded window
+    auto it = std::lower_bound(dataset.begin() + bound_min, dataset.begin() + bound_max + 1, query_key);
+    const size_t resolved_index = std::distance(dataset.begin(), it);
+    const bool is_range_valid = (it != (dataset.begin() + bound_max + 1)) && (*it == query_key);
 
-    // ۳. بنچمارک مقایسه‌ای با std::sort بر روی همان دیتا
-    std::vector<double> std_sort_times;
-    std_sort_times.reserve(ITERATIONS);
-
-    for (int iter = 0; iter < ITERATIONS; ++iter) {
-        std::memcpy(work_buffer.data(), raw_dataset.data(), BENCHMARK_ELEMENTS * sizeof(int64_t));
-
-        const auto start = std::chrono::high_resolution_clock::now();
-        std::sort(work_buffer.begin(), work_buffer.end());
-        const auto end = std::chrono::high_resolution_clock::now();
-
-        const double elapsed_us = std::chrono::duration<double, std::micro>(end - start).count();
-        std_sort_times.push_back(elapsed_us);
-    }
-
-    const double min_std_us = *std::min_element(std_sort_times.begin(), std_sort_times.end());
-    const double avg_std_us = std::accumulate(std_sort_times.begin(), std_sort_times.end(), 0.0) / ITERATIONS;
-
-    const double speedup = min_std_us / min_ss_us;
-    const double throughput_melem = (BENCHMARK_ELEMENTS / (min_ss_us * 1e-6)) / 1e6;
-
-    std::cout << "----------------------------------------\n";
-    std::cout << "mlaa::sample_sort (Min) : " << min_ss_us << " us  (" << (min_ss_us / 1000.0) << " ms)\n";
-    std::cout << "mlaa::sample_sort (Avg) : " << avg_ss_us << " us\n";
-    std::cout << "std::sort         (Min) : " << min_std_us << " us  (" << (min_std_us / 1000.0) << " ms)\n";
-    std::cout << "Throughput              : " << throughput_melem << " M elements/sec\n";
-    std::cout << "Performance Gain        : " << speedup << "x faster than std::sort\n";
+    // 7. Output evaluation report
+    std::cout << "\n========================================\n";
+    std::cout << "         FastRMI PREDICTION REPORT      \n";
+    std::cout << "========================================\n";
+    std::cout << "Target Index       : " << TARGET_INDEX << "\n";
+    std::cout << "Query Key Value    : " << query_key << "\n";
+    std::cout << "Predicted Index    : " << pred_pos << "\n";
+    std::cout << "Error Bound (+/-)  : " << error_bound << "\n";
+    std::cout << "Search Window      : [" << bound_min << ", " << bound_max << "]\n";
+    std::cout << "Resolved Index     : " << resolved_index << "\n";
+    std::cout << "Prediction Latency : " << latency_ns << " ns\n";
+    std::cout << "Range Verification : " << (is_range_valid ? "PASSED" : "FAILED") << "\n";
     std::cout << "========================================\n";
 
-    return 0;
+    return is_range_valid ? 0 : 1;
 }
+
+
+/*
+========================================
+           CPU HARDWARE TOPOLOGY        
+========================================
+Physical Cores : 6
+Logical Cores  : 12
+----------------------------------------
+L1 Data Cache  : 32 KB
+L2 Cache       : 512 KB
+L3 Cache       : 4 MB
+Cache Line     : 64 bytes
+----------------------------------------
+Highest SIMD   : AVX2
+AVX Supported  : Yes
+AVX2 Supported : Yes
+FMA Supported  : Yes
+========================================
+
+Dataset Loaded  : 1000000 int64_t elements (~7 MB)
+Sort Verification: PASSED (std::is_sorted == true)
+
+========================================
+         FastRMI PREDICTION REPORT      
+========================================
+Target Index       : 550000
+Query Key Value    : 512435
+Predicted Index    : 549967
+Error Bound (+/-)  : 66
+Search Window      : [549901, 550033]
+Resolved Index     : 549998
+Prediction Latency : 300 ns
+Range Verification : PASSED
+========================================
+*/

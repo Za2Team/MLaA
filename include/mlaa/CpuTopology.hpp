@@ -14,17 +14,14 @@ enum class SimdLevel : std::uint8_t {
 };
 
 struct CpuTopology {
-    // اطلاعات حافظه کش (بر حسب بایت)
     std::size_t l1d_size{0};
     std::size_t l2_size{0};
     std::size_t l3_size{0};
     std::size_t line_size{64};
 
-    // اطلاعات هسته‌ها و تردها
     std::size_t physical_cores{1};
     std::size_t logical_cores{1};
 
-    // پشتیبانی معتبر از دستورالعمل‌های برداری (سخت‌افزار + سیستم‌عامل)
     bool has_avx{false};
     bool has_avx2{false};
     bool has_fma{false};
@@ -36,7 +33,6 @@ struct CpuTopology {
 
     SimdLevel highest_simd{SimdLevel::None};
 
-    // برگرداندن نام بالاترین فرمت SIMD برای لاگ‌گیری راحت
     [[nodiscard]] const char* simd_name() const noexcept {
         switch (highest_simd) {
             case SimdLevel::AVX512: return "AVX-512";
@@ -47,7 +43,7 @@ struct CpuTopology {
         }
     }
 
-    // دسترسی سراسری با یک‌بار مقداردهی امن (Thread-Safe Magic Static)
+    // (Thread-Safe Magic Static)
     static const CpuTopology& get() noexcept;
 };
 

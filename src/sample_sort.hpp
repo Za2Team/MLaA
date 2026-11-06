@@ -27,7 +27,6 @@ struct alignas(64) CacheTuningParams {
             if (cpu.l3_size > 0) params.l3_size = cpu.l3_size;
             if (cpu.line_size > 0) params.line_size = cpu.line_size;
 
-            // محاسبه آستانه بیسکیس متناسب با اندازه بایت دیتا
             size_t optimal_base = (params.l1d_size / (2 * sizeof(T)));
             if (optimal_base < 512) optimal_base = 512;
             if (optimal_base > 4096) optimal_base = 4096;
